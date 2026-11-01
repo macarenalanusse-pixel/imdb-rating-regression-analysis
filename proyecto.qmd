@@ -1,0 +1,582 @@
+---
+title: "Proyecto final"
+
+format:
+  pdf:
+    highlight-style: github
+    code-block-bg: "#f8f8f8"
+    code-block-border-left: "#4F81BD"
+    fig-align: center
+    code-font-size: 0.75em
+---
+
+```{r, include=FALSE}
+options(scipen = 999)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(dplyr)
+library(corrplot)
+library(sandwich)
+library(lmtest)
+library(car)
+library(skedastic)
+library(tseries)
+library(qqplotr)
+library(readxl)
+library(patchwork)
+library(kableExtra)
+```
+
+```{r}
+datos<- read_excel("imdb_datos_limpios.xlsx")
+
+datos = datos %>%
+  filter(
+    if_all(
+      c(desnudos, violencia, palabrotas, alcohol, terror),
+      ~ !is.na(.)
+    )
+  )
+```
+
+## Modelo inicial
+
+Se crea modelo con todas las variables explicativas que incluye el data set.
+```{r}
+mod1 <- lm(puntuacion ~ anio + votos + Action + Adventure + Animation
+           + Biography + Comedy + Crime  + Drama + Fantasy + Horror + 
+             Mystery + Thriller + Others + certificacion + desnudos + 
+             violencia + palabrotas + alcohol + terror, data = datos)
+```
+
+# Diagnóstico
+Una vez ajustado el modelo inicial, se realiza el diagnóstico de los supuestos del modelo de regresión lineal. En esta etapa se evalúan la presencia de multicolinealidad entre las variables explicativas, la linealidad de la relación entre las variables y la respuesta, la homocedasticidad de los residuos y, posteriormente, otros supuestos relevantes para validar el modelo.
+
+## Multicolinealidad
+
+Se investiga multicolinealidad del modelo inicial.
+```{r, eval=FALSE}
+vif(mod1)
+```
+```{r, echo=FALSE}
+vif(mod1) |>
+  as.data.frame() |>
+  knitr::kable(digits = 3, caption = "VIF - mod1") |>
+  kable_styling(
+    position     = "center",
+    latex_options = c("striped", "condensed", "hold_position"),
+    font_size    = 8
+  )
+```
+
+La variable Action presenta un VIF superior a 10, por lo que se ajusta un nuevo modelo excluyéndola.
+```{r}
+mod2 <- lm(puntuacion ~ anio + votos + Adventure + Animation + Biography
+           + Comedy + Crime  + Drama + Fantasy + Horror + Mystery + Thriller
+           + Others + certificacion + desnudos + violencia + palabrotas + 
+             alcohol + terror, data = datos)
+```
+
+Se investiga multicolinealidad del nuevo modelo
+```{r,eval=FALSE}
+vif(mod2)
+```
+```{r, echo=FALSE}
+vif(mod2) |>
+  as.data.frame() |>
+  knitr::kable(digits = 3, caption = "VIF - mod2") |>
+  kable_styling(
+    position     = "center",
+    latex_options = c("striped", "condensed", "hold_position"),
+    font_size    = 8
+  )
+```
+Todos los VIF son menores a 5; terror y violencia tienen un VIF cercano a 5, aún así se decide mantenerlas en el modelo ya que no alcanzan el umbral.
+
+## Linealidad
+
+Se analiza la linealidad mediante un gráfico de residuos vs valores ajustados, evaluando la existencia de patrones sistemáticos.
+```{r, fig.height=3, fig.width=5}
+predichos = fitted(mod2)
+residuos = residuals(mod2)
+
+datos$predichos <- fitted(mod2)
+datos$residuos  <- residuals(mod2)
+
+
+ggplot(datos, aes(x = predichos, y = residuos)) +
+  geom_point() +
+  xlab(expression(hat(y))) +
+  ylab(expression(hat(epsilon))) +
+  geom_abline(intercept = 0, slope = 0, linetype = 'dashed', col = 2) +
+  theme_bw() +
+  geom_smooth(se = FALSE)
+```
+El modelo está subestimado en algunas zonas y luego sobreestimado en otras. 
+Se esperaría que los puntos estuvieran dispersos en todo el dominio sin presentar un patron, dado que esto no ocurre se generan gráficos parciales de los residuos vs los predichos de cada variable explicativa, con el fin de corregir los problemas de linealidad en nuevo modelo, intentando identificar que variables explicativas son las que podrían estar generando el patrón presentando.
+
+```{r, fig.height=3, fig.width=5}
+crPlot(mod2, variable ='votos')
+```
+```{r, fig.height=3, fig.width=5}
+crPlot(mod2, variable ='anio')
+```
+
+
+Al observar que la variable votos presenta un patron logaritmico se la transforma con esta función en un nuevo modelo y se realiza nuevamente el grafico parcial para ver si resulta en una mejora.
+```{r, fig.height=3, fig.width=5}
+mod_log <- lm(
+  puntuacion ~ anio + log(votos) +
+    Adventure + Animation + Biography + Comedy +
+    Crime + Drama + Fantasy + Horror + Mystery + Thriller + Others +
+    certificacion + desnudos + violencia + palabrotas + alcohol + terror,
+  data = datos
+)
+
+crPlot(mod_log, variable = "log(votos)")
+```
+
+Se vuelve a graficar los predichos y los residuos
+```{r, fig.height=3, fig.width=5}
+datos$predichos_mod_log <- fitted(mod_log)
+datos$residuos_mod_log  <- residuals(mod_log)
+
+ggplot(datos, aes(x = predichos_mod_log, y = residuos_mod_log)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 0,
+              linetype = "dashed", col = 2) +
+  geom_smooth(se = FALSE) +
+  xlab(expression(hat(y))) +
+  ylab(expression(hat(epsilon))) +
+  theme_bw()
+```
+Con este nuevo modelo se observa una mejora en la dispersión de los residuos respecto al modelo anterior, aunque para valores ajustados inferiores a 7 continúa apreciándose una mayor variabilidad.
+
+Con respecto a la variable anio, se realizaron distinas transformaciones intentando desarmar el patron que presentan los graficos parciales pero no se encontraron mejorías. Por lo tanto no se realizan cambios al respecto y se mantiene en el nuevo modelo.
+
+El grafico parcial de la variable anio en el nuevo modelo es el siguiente:
+```{r, fig.height=3, fig.width=5}
+crPlot(mod_log, variable = "anio")
+```
+## Homocedasticidad
+
+Se calculan los residuos, así como sus versiones estandarizadas y studentizadas.
+```{r}
+datos$r_i <- residuals(mod_log)  # residuos
+datos$s_i <- rstandard(mod_log)  # studendizados INTERNAMENTE
+datos$t_i <- rstudent(mod_log)   # studentizados EXTERNAMENTE
+```
+
+Predichos vs Residuos Studentizados
+```{r, fig.height=3, fig.width=5}
+ggplot(datos, aes(x = predichos_mod_log, y = t_i)) + 
+  geom_point() +
+  xlab('Predichos') +
+  ylab('Residuos') +
+  geom_abline(slope = 0, intercept = 0)
+```
+
+Se realizan test para verificar la homocedasticidad.
+Teniendo en cuenta que la hipotesis nula es que los errores son homocedasticos por lo tanto se quiere un p-valor alto.
+
+```{r}
+bptest(mod_log)
+```
+```{r}
+breusch_pagan(mod_log) 
+```
+
+El p-valor de ambos test son chicos, por lo que se rechaza $H_0$ y se concluye que el modelo es heterocedastico.
+
+Con el fin de identificar posibles fuentes de heterocedasticidad, se analizan los residuos studentizados según cada variable explicativa.
+
+```{r echo=FALSE, fig.height=9, fig.width=8, message=FALSE, warning=FALSE}
+p1 <- ggplot(datos, aes(x = factor(Adventure), y = t_i)) + #Adventure
+  geom_boxplot() +
+  xlab('Adventure') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p2 <- ggplot(datos, aes(x = factor(Animation), y = t_i)) + #Animation
+  geom_boxplot() +
+  xlab('Animación') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p3 <- ggplot(datos, aes(x = factor(Biography), y = t_i)) + #Biography
+  geom_boxplot() +
+  xlab('Biografías') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p4 <- ggplot(datos, aes(x = factor(Comedy) , y = t_i)) + #Comedia
+  geom_boxplot() +
+  xlab('Comedia') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p5 <- ggplot(datos, aes(x = factor(Crime) , y = t_i)) + #Crime
+  geom_boxplot() +
+  xlab('Crimen') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p6 <- ggplot(datos, aes(x = factor(Drama) , y = t_i)) + #Drama
+  geom_boxplot() +
+  xlab('Drama') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p7 <- ggplot(datos, aes(x = factor(Fantasy) , y = t_i)) + #Fantansy
+  geom_boxplot() +
+  xlab('Fantasía') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p8 <- ggplot(datos, aes(x = factor(Horror) , y = t_i)) + #Horror
+  geom_boxplot() +
+  xlab('Terror (género)') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p9 <- ggplot(datos, aes(x = factor(Mystery) , y = t_i)) + #Mystery
+  geom_boxplot() +
+  xlab('Misterio') + 
+  ylab('residuos st') +
+  theme_bw() 
+
+p10 <- ggplot(datos, aes(x = factor(Thriller) , y = t_i)) + #Thriller
+  geom_boxplot() +
+  xlab('Thriller') + 
+  ylab('residuos st') +
+  theme_bw()
+
+p11 <- ggplot(datos, aes(x = factor(Others), y = t_i)) + #Others 
+  geom_boxplot() +
+  xlab('Otros') + 
+  ylab('residuos st') +
+  theme_bw()
+
+(p1 + p2 + p3 + p4 +
+ p5 + p6 + p7 + p8 +
+ p9 + p10 + p11 ) +
+  plot_layout(ncol = 3) +
+  plot_annotation(title = "Residuos estandarizados según género")
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=9, fig.width=8}
+p_cert <- ggplot(datos, aes(x = certificacion, y = t_i)) +
+  geom_boxplot() +
+  xlab('Certificación') + 
+  ylab('residuos st') +
+  theme_bw() +
+  theme(text = element_text(size = 15))
+
+p2_1 <- ggplot(datos, aes(x =  desnudos, y = t_i)) +
+  geom_boxplot() +
+  xlab('Desnudos') + 
+  ylab('residuos st') +
+  theme_bw() +
+  theme(text = element_text(size = 15))
+
+p2_2 <- ggplot(datos, aes(x = violencia , y = t_i)) +
+  geom_boxplot() +
+  xlab('Violencia') + 
+  ylab('residuos st') +
+  theme_bw() +
+  theme(text = element_text(size = 15))
+
+p2_3 <- ggplot(datos, aes(x = palabrotas , y = t_i)) +
+  geom_boxplot() +
+  xlab('Palabrotas') + 
+  ylab('residuos st') +
+  theme_bw() +
+  theme(text = element_text(size = 15))
+
+p2_4 <- ggplot(datos, aes(x = alcohol , y = t_i)) +
+  geom_boxplot() +
+  xlab('Alcohol') + 
+  ylab('residuos st') +
+  theme_bw() +
+  theme(text = element_text(size = 15))
+
+p2_5 <- ggplot(datos, aes(x = terror , y = t_i)) +
+  geom_boxplot() +
+  xlab('Terror') + 
+  ylab('residuos st') +
+  theme_bw() +
+  theme(text = element_text(size = 15))
+
+(p_cert ) /
+(p2_1 + p2_2) /
+(p2_3 + p2_4) /
+(p2_5 + plot_spacer())
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=4, fig.width=6}
+#Presenta heterocedasticidad
+p3_1 <- ggplot(datos, aes(x = votos, y = t_i)) + 
+  geom_point() +
+  xlab('Votos') +
+  ylab('Residuos') +
+  geom_abline(slope = 0, intercept = 0)
+
+#Presenta heterocedasticidad 
+p3_2 <- ggplot(datos, aes(x = anio, y = t_i)) + 
+  geom_point() +
+  xlab('anio') +
+  ylab('Residuos') +
+  geom_abline(slope = 0, intercept = 0)
+
+(p3_1 + p3_2) +
+  plot_layout(ncol = 2)
+
+```
+En general, los diagramas de caja no muestran diferencias importantes en la dispersión de los residuos entre categorías, por lo que no se observa evidencia de heterocedasticidad asociada a las variables categóricas. En cambio, las variables numéricas anio y votos presentan un patrón sistemático en los residuos que sugiere heterocedasticidad.
+
+Buscamos arreglar heterocedasticidad centrando la variable anio respecto a su media.
+```{r, fig.height=3, fig.width=5}
+datos <- datos %>%
+  mutate(anio_c = anio - mean(anio))
+
+ggplot(datos, aes(x = anio_c, y = t_i)) + 
+  geom_point() +
+  xlab('anio centrado') +
+  ylab('Residuos') +
+  geom_abline(slope = 0, intercept = 0)
+
+mod_log_cuad <- lm(
+  log(puntuacion) ~ anio_c + I(anio_c^2) + log(votos) +
+    Adventure + Animation + Biography + Comedy +
+    Crime + Drama + Fantasy + Horror + Mystery + Thriller + Others +
+    certificacion + desnudos + violencia + palabrotas + alcohol + terror,
+  data = datos
+)
+```
+```{r}
+bptest(mod_log_cuad)
+```
+```{r}
+breusch_pagan(mod_log_cuad)
+```
+Luego de evaluar distintas transformaciones sobre la variable anio, no se logra corregir la heterocedasticidad. Por este motivo, se mantiene el modelo anterior (mod_log) y se utilizan errores estándar robustos HC3 para evaluar la significación de los coeficientes, ya que este método no requiere asumir homocedasticidad.
+
+```{r,eval=FALSE}
+coeftest(mod_log, vcov = vcovHC(mod_log, "HC3"))
+```
+
+```{r,echo=FALSE}
+coeftest(mod_log, vcov = vcovHC(mod_log, "HC3")) |>
+  broom::tidy() |>
+  knitr::kable(digits = 4, caption = "Coeficientes HC3 - mod log") |>
+  kable_styling(
+    position      = "center",
+    latex_options = c("striped", "condensed", "hold_position"),
+    font_size     = 8
+  )
+```
+
+
+Despues del test, a un nivel de significación del 10%, se eliminan las variables: fantasy, thriller, palabrotas y alcohol del modelo.
+
+```{r}
+mod_log_red <- lm(
+  puntuacion ~ anio + log(votos) +
+    Adventure + Animation + Biography + Comedy +
+    Crime + Drama + Horror + Mystery + Others +
+    certificacion + desnudos + violencia + terror,
+  data = datos
+)
+```
+```{r, eval=FALSE}
+coeftest(mod_log_red, vcov = vcovHC(mod_log_red, "HC3"))
+```
+```{r,echo=FALSE}
+coeftest(mod_log_red, vcov = vcovHC(mod_log_red, "HC3")) |>
+  broom::tidy() |>
+  knitr::kable(digits = 4, caption = "Coeficientes HC3 - mod log red") |>
+  kable_styling(
+    position      = "center",
+    latex_options = c("striped", "condensed", "hold_position"),
+    font_size     = 8
+  )
+```
+
+
+## Normalidad
+
+Se evalúa el supuesto de normalidad de los residuos mediante los tests de Shapiro-Wilk, Jarque-Bera y Kolmogorov-Smirnov. En los tres casos, la hipótesis nula establece que los residuos siguen una distribución normal.
+```{r}
+shapiro.test(datos$t_i)
+tseries::jarque.bera.test(datos$t_i)
+ks.test(datos$t_i, 'pnorm')
+```
+Se rechaza H0 (Rechazo que haya normalidad), debido a un p-valor diminuto.
+
+```{r, fig.height=3, fig.width=5}
+datos$t_i2 <- rstudent(mod_log_red)   # studentizados EXTERNAMENTE
+
+ggplot(data = datos, aes(sample = t_i2)) +
+  stat_qq_band(fill = 2) +
+  stat_qq_line(col = 2) +
+  stat_qq_point() +
+  xlab("Cuantiles teoricos")+
+  ylab("Cuantiles empiricos")
+```
+El gráfico Q-Q confirma los resultados obtenidos mediante los tests de normalidad. Se observa que los residuos se apartan de la recta teórica, principalmente en los extremos de la distribución, lo que evidencia la presencia de colas más pesadas que las esperadas bajo normalidad. Esto sugiere la existencia de observaciones atípicas.
+
+### Datos atípicos
+
+Se buscan datos atipicos que podrían haber llevado a los test anteriores a rechazar normalidad.
+
+```{r,eval=FALSE}
+outlierTest(mod_log_red)
+```
+```{r,echo=FALSE}
+ot <- outlierTest(mod_log_red)
+
+data.frame(
+  rstudent            = ot$rstudent,
+  `p-valor no ajustado` = ot$p,
+  `p-valor Bonferroni` = ot$bonf.p,
+  check.names = FALSE
+) |>
+  knitr::kable(digits = 6, caption = "Datos atípicos - outlierTest") |>
+  kable_styling(
+    position      = "center",
+    latex_options = c("striped", "condensed", "hold_position"),
+    font_size     = 9
+  )
+```
+
+
+Este test toma como hipotesis nula que la observación no es atípica, obervando los resultados se encuentran varios datos atípicos.
+
+### Datos influyentes
+
+A partir de las observaciones identificadas como atípicas, se analizan el leverage y la distancia de Cook con el objetivo de evaluar su influencia sobre el ajuste del modelo.
+
+Primero, se definen medidas de influencia.
+```{r}
+h_i <- influence(mod_log_red)$hat
+D_i <- cooks.distance(mod_log_red)
+df <- data.frame(i = 1:nrow(datos),
+                 h_i = h_i,
+                 D_i = D_i)
+
+n <- nrow(datos) #Cantidad de observaciones
+p <- length(coef(mod_log_red)) #Cantidad de variables explicativas
+```
+
+Se estudia leverage. 
+Las observaciones ubicadas por encima de la línea de referencia presentan un leverage elevado y, por lo tanto, tienen mayor potencial de influir en el ajuste del modelo.
+```{r}
+g1 <- ggplot(df, aes(x = i, y = h_i)) +
+  geom_point() +
+  geom_segment(aes(x = i, xend = i, y = 0, yend = h_i)) +
+  xlab('') +
+  ylab(expression(h[i])) + 
+  ggtitle("Leverange") +
+  geom_abline(slope = 0, intercept = 2*p/n, col = 2, linetype = 'dashed')
+```
+
+De igual forma con la distancia de Cook que permite evaluar la influencia de cada observación sobre el ajuste del modelo. Aquellas observaciones que superan la línea de referencia se consideran potencialmente influyentes y requieren un análisis más detallado.
+```{r}
+g2 <- ggplot(df, aes(x = i, y = D_i)) +
+  geom_point() +
+  geom_segment(aes(x = i, xend = i, y = 0, yend = D_i)) +
+  xlab('') +
+  ylab(expression(D[i])) + 
+  ggtitle("Distancia de Cook") +
+  geom_abline(slope = 0, intercept = 4/n, col = 2, linetype = 'dashed')
+```
+
+```{r, fig.height=4, fig.width=8}
+(g1 + g2) +
+  plot_layout(ncol = 2)
+```
+
+Tanto el gráfico de leverage como el de distancia de Cook identifican un número considerable de observaciones potencialmente influyentes. Dado el gran tamaño de la muestra, no se realiza un análisis individual de cada una de ellas y se continúa con el modelo ajustado.
+
+## Conclusiones
+
+Al terminar la etapa de diagnóstico, no se pudo conseguir un modelo que cumpla con el supuesto de normalidad. 
+No obstante, debido a que el número de observaciones es mayor a mil, aún se puede evaluar la significación de las variables con el t-valor. Esto es consecuencia del teorema del límite central, que explica que la distribución de la media de cualquier distribución poblacional, converge a una distribución normal. Como el la hipótesis nula del t-valor asume que las medias poblacionales de dos grupos son iguales, y por Teorema del límite central, se concluye que estas distribuyen normal, se continúa usando los t-valores cómo válidos.
+
+Luego de realizar el diagnóstico, se selecciona mod_log_red como modelo final. Si bien no fue posible encontrar un modelo que cumpliera todos los supuestos, este fue el que presentó el mejor desempeño luego de las transformaciones y simplificaciones realizadas. Como el modelo no cumple homocedasticidad, la significación de las variables se evalúa mediante errores estándar robustos HC3. Además, al tratarse de una muestra de más de 1000 observaciones, se considera que la inferencia basada en los estadísticos t sigue siendo válida de forma aproximada.
+
+# Interpretación de resultados
+
+## Coeficientes
+
+Viendo los resultados de HC3 se concluye:
+
+### Para las variables numericas:
+
+Con respecto a la variable *anio*, el $\hat{\beta}$ asociado a esta variable es -0,0169, es decir a medida que año de la pelicula aumenta, su puntuacion disminuye en 0,02 puntos, el p-valor de esta variable es aproximadamente 0, por lo tanto es altamente significativa.
+
+La variable *log(votos)*, tiene un $\hat{\beta}$ de 0,3274, es decir, a medida que aumenta la cantidad de votos de una película, su puntuación aumenta. Debido a que la variable se encuentra transformada mediante logaritmo, este aumento no es constante, sino que se da a un ritmo decreciente. El p-valor de esta variable tambien es aprox. 0, e igualmente es significativa.
+
+### Para las variables de los generos:
+
+Se observa que Biography, Crime, Drama, Animation, Others, Mystery, Comedy y Adventure presentan coeficientes positivos, por lo que, manteniendo el resto de las variables constantes, se asocian con una mayor puntuación respecto al género de referencia. En cambio, Horror presenta un coeficiente negativo, indicando una menor puntuación esperada. Todas estas variables resultan significativas al 10%.
+
+### Para la certificación de una pelicula:
+
+Unicamente la categoría "Sin clasificar" presenta un efecto negativo estadísticamente significativo sobre la puntuación. La categoría "Infantil/Familiar" resulta significativa al 10%, mientras que la categoría "Adultos" no presenta evidencia suficiente para afirmar que difiere de la categoría de referencia.
+
+### Para las variables desnudos, violencia y terror: 
+
+Con respecto a la variable *desnudos*, la categoría "No" presenta un coeficiente de 0,1436, indicando que las películas sin desnudos presentan una puntuación esperada 0,1436 puntos mayor que las películas pertenecientes a la categoría de referencia(moderado), manteniendo el resto de las variables constantes. Por otro lado, la categoría "Severo" presenta un coeficiente de -0,1963, asociado a una puntuación esperada 0,1963 puntos menor que la categoría de referencia. La categoría "Poco" no resulta estadísticamente significativa.
+
+La variable *violencia*, la categoría "No" presenta un coeficiente de 0,3419, indicando que las películas sin violencia presentan una puntuación esperada 0,3419 puntos mayor que las películas con violencia moderada, manteniendo el resto de las variables constantes. Por otro lado, la categoría "Poco" presenta un coeficiente de 0,0982, indicando una puntuación esperada ligeramente superior a la categoría de referencia. La categoría "Severo" no resulta estadísticamente significativa, por lo que no se puede afirmar que exista una diferencia con respecto a las películas con violencia moderada.
+
+Con respecto a la variable *terror*, la categoría "No" presenta un coeficiente de -0,1432, indicando que las películas sin contenido de terror presentan una puntuación esperada 0,1432 puntos menor que las películas con contenido de terror moderado, manteniendo el resto de las variables constantes. En cambio, la categoría "Severo" presenta un coeficiente de 0,0965, indicando una puntuación esperada ligeramente superior a la categoría de referencia. La categoría "Poco" no resulta estadísticamente significativa, por lo que no se puede afirmar que exista una diferencia con respecto a las películas con contenido de terror moderado.
+
+# Validación del modelo
+
+Con el objetivo de evaluar la capacidad predictiva del modelo, se realiza una validación mediante particiones aleatorias de los datos. En cada iteración se utiliza el 80% de las observaciones para ajustar el modelo y el 20% restante para evaluar las predicciones. Este procedimiento se repite 1000 veces y, en cada partición, se calcula el coeficiente de determinación ($R^2$) entre las puntuaciones observadas y las predichas.
+
+```{r}
+set.seed(42)
+
+B <- 1000
+
+r <- numeric(B)
+
+for(i in 1:B){
+  
+  muestra_e <- sample(
+    1:nrow(datos),
+    size = 0.8 * nrow(datos)
+  )
+  
+  train <- datos[muestra_e, ]
+  test  <- datos[-muestra_e, ]
+  
+  # Ajustar el modelo utilizando únicamente el conjunto de entrenamiento
+  mod_train <- lm(
+    puntuacion ~ anio + log(votos) +
+      Adventure + Animation + Biography + Comedy +
+      Crime + Drama + Horror + Mystery + Others +
+      certificacion + desnudos + violencia + terror,
+    data = train
+  )
+  
+  # Predicciones sobre el conjunto de prueba
+  pred <- predict(mod_train, newdata = test)
+  
+  # R² de predicción
+  r[i] <- cor(pred, test$puntuacion)^2
+}
+```
+```{r}
+median(r)
+mean(r)
+sd(r)
+
+# Intervalo del 95%
+quantile(r, probs = c(0.025, 0.975))
+```
+Se obtuvo una mediana del $R^2$ de 0,4183 y una media de 0,4171. Además, la desviación estándar fue de 0,0277, lo que indica que el desempeño predictivo del modelo varía poco entre las distintas particiones. El 95% de los valores de $R^2$ se encontró entre 0,3637 y 0,4697, evidenciando un comportamiento estable del modelo frente a diferentes conjuntos de entrenamiento y prueba.
